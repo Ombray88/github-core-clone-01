@@ -3,7 +3,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createStore, type Store } from './store.ts';
 import { handleRest } from './rest.ts';
-import { handleGitRequest } from './git.ts';
+import { handleGitRequest, handleGitReceivePack, handleGitUploadPack } from './git.ts';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const MAX_BODY_SIZE = 64 * 1024 * 1024; // 64 MiB
@@ -83,9 +83,9 @@ export function createApp(): Server {
     } catch (err: any) {
       if (err && err.message === 'BODY_TOO_LARGE') {
         sendJson(res, 413, { message: 'Request entity too large' });
-        return;
+      } else {
+        sendJson(res, 400, { message: 'Bad request body' });
       }
-      sendJson(res, 400, { message: 'Bad request body' });
       return;
     }
 
@@ -141,9 +141,17 @@ export function createApp(): Server {
         return;
       }
 
-      if (subPath === '/git-upload-pack' || subPath === '/git-receive-pack') {
-        // For this session, upload-pack and receive-pack POST handlers come in later sessions; answer 404 JSON.
-        sendJson(res, 404, { message: 'Not Found' });
+      if (subPath === '/git-upload-pack') {
+        const gitRes = handleGitUploadPack(store, owner, repoName, headerMap, body);
+        res.writeHead(gitRes.status, gitRes.headers);
+        res.end(gitRes.body);
+        return;
+      }
+
+      if (subPath === '/git-receive-pack') {
+        const gitRes = handleGitReceivePack(store, owner, repoName, headerMap, body);
+        res.writeHead(gitRes.status, gitRes.headers);
+        res.end(gitRes.body);
         return;
       }
     }
