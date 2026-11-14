@@ -1,22 +1,29 @@
-// The starter's HTTP surface, exactly as it ships: a health probe and an API root, and a JSON 404
-// for everything else. The contest's real surface — git smart HTTP, REST v3 resources, GraphQL v4 and
-// the MCP endpoint — is what you add (README.md names it, and the rules link below says what scores).
-//
-// app.ts is deliberately separate from main.ts: this is the server, the file you grow; main.ts is the
-// entry <-> env lifecycle and should stay as it is.
+// The server routing and lifecycle implementation wiring REST, smart-HTTP, and health checks.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createStore, type Store } from './store.ts';
+import { handleRest } from './rest.ts';
+import { handleGitRequest } from './git.ts';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
+const MAX_BODY_SIZE = 64 * 1024 * 1024; // 64 MiB
 
-/** Answer one request with a JSON body; `headers` go beside the JSON ones. */
-function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
+let requestIdCounter = 1;
+
+/** Answer one request with a JSON body and standard headers including request ID. */
+function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
+  const reqId = `req-${requestIdCounter++}`;
   const text = `${JSON.stringify(body)}\n`;
-  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
+  res.writeHead(status, {
+    'content-type': JSON_TYPE,
+    'content-length': Buffer.byteLength(text),
+    'x-github-request-id': reqId,
+    ...extraHeaders,
+  });
   res.end(text);
 }
 
-/** The path of a request URL, or '/' when it does not parse (never a throw from a request). */
+/** Extract pathname from request URL. */
 function pathOf(req: IncomingMessage): string {
   try {
     return new URL(req.url ?? '/', 'http://entry').pathname;
@@ -25,25 +32,123 @@ function pathOf(req: IncomingMessage): string {
   }
 }
 
-/** Build the server. It binds nothing until the caller listens; the entry listens on an ephemeral port. */
+/** Extract query record from request URL search parameters. */
+function queryOf(req: IncomingMessage): Record<string, string> {
+  try {
+    const url = new URL(req.url ?? '/', 'http://entry');
+    const query: Record<string, string> = {};
+    for (const [key, val] of url.searchParams.entries()) {
+      query[key] = val;
+    }
+    return query;
+  } catch {
+    return {};
+  }
+}
+
+/** Read full request body up to MAX_BODY_SIZE, returning a Buffer or throwing/answering 413 if too large. */
+async function readRequestBody(req: IncomingMessage): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let totalSize = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalSize += buf.length;
+    if (totalSize > MAX_BODY_SIZE) {
+      throw new Error('BODY_TOO_LARGE');
+    }
+    chunks.push(buf);
+  }
+  if (totalSize === 0) return null;
+  return Buffer.concat(chunks);
+}
+
+/** Build the server with shared store instance and route handlers. */
 export function createApp(): Server {
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
+  const store = createStore();
+
+  return createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const path = pathOf(req);
     const method = req.method ?? 'GET';
 
-    // The env's boot check calls this twice: 200 {"ok":true}.
+    // 1. Health check probe
     if (method === 'GET' && path === '/healthz') {
       sendJson(res, 200, { ok: true });
       return;
     }
 
-    // The GitHub API root: a 200 with the token's scopes, as api.github.com answers GET /.
-    if (method === 'GET' && (path === '/api/v3' || path === '/api/v3/')) {
-      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org' });
+    // Read request body with size capping for REST and other methods if needed
+    let body: Buffer | null = null;
+    try {
+      body = await readRequestBody(req);
+    } catch (err: any) {
+      if (err && err.message === 'BODY_TOO_LARGE') {
+        sendJson(res, 413, { message: 'Request entity too large' });
+        return;
+      }
+      sendJson(res, 400, { message: 'Bad request body' });
       return;
     }
 
-    // Everything else, every method: GitHub's 404 body.
+    // 2. REST v3 routing
+    if (path.startsWith('/api/v3')) {
+      const query = queryOf(req);
+      const restReq = {
+        method,
+        pathname: path,
+        query,
+        getHeader(name: string): string | null {
+          const val = req.headers[name.toLowerCase()];
+          if (Array.isArray(val)) return val[0];
+          return val ?? null;
+        },
+        body,
+      };
+
+      const restRes = handleRest(store, restReq);
+      res.writeHead(restRes.status, restRes.headers);
+      if (restRes.body !== null) {
+        res.end(restRes.body);
+      } else {
+        res.end();
+      }
+      return;
+    }
+
+    // 3. Smart-HTTP routes: /<owner>/<repo>.git/...
+    // Matches patterns:
+    // /<owner>/<repo>.git/info/refs
+    // /<owner>/<repo>.git/git-upload-pack
+    // /<owner>/<repo>.git/git-receive-pack
+    const gitMatch = path.match(/^\/([^/]+)\/([^/]+)\.git(\/.*)?$/);
+    if (gitMatch) {
+      const owner = gitMatch[1];
+      const repoName = gitMatch[2];
+      const subPath = gitMatch[3] ?? '/';
+
+      const query = queryOf(req);
+      const headerMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === 'string') headerMap[k] = v;
+        else if (Array.isArray(v)) headerMap[k] = v[0];
+      }
+
+      if (subPath === '/info/refs') {
+        const service = query['service'];
+        const serviceName = service || (method === 'POST' ? path.substring(path.lastIndexOf('/') + 1) : '');
+        const gitRes = handleGitRequest(store, owner, repoName, serviceName, headerMap, query);
+        res.writeHead(gitRes.status, gitRes.headers);
+        res.end(gitRes.body);
+        return;
+      }
+
+      if (subPath === '/git-upload-pack' || subPath === '/git-receive-pack') {
+        // For this session, upload-pack and receive-pack POST handlers come in later sessions; answer 404 JSON.
+        sendJson(res, 404, { message: 'Not Found' });
+        return;
+      }
+    }
+
+    // 5. Unknown routes: 404 with JSON message body and non-empty X-GitHub-Request-Id header.
     sendJson(res, 404, { message: 'Not Found' });
   });
 }
