@@ -474,7 +474,13 @@ function formatPullRequestNode(store: Store, repo: Repository, pr: PullRequest) 
 function findNode(store: Store, id: string): { type: string; data: any } | null {
   for (const repo of store.repositories.values()) {
     if (makeGlobalId('repository', repo.fullName) === id) {
-      return { type: 'Repository', data: repo };
+      return {
+        type: 'Repository',
+        data: {
+          __typename: 'Repository',
+          ...repo,
+        },
+      };
     }
     for (const issue of repo.issues) {
       const issueId = issue.id || makeGlobalId('issue', repo.fullName, issue.number);
