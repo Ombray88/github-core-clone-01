@@ -421,10 +421,84 @@ export function handleGitUploadPack(
 
       const validHaves = haves.filter(h => getObject(store, h) !== null);
       if (validHaves.length > 0) {
-        const haveReachable = walkReachability(store, validHaves);
-        for (const hid of haveReachable) {
-          includedObjectIds.delete(hid);
-          includedCommits.delete(hid);
+        const excludeObjectIds = new Set<string>();
+        const excludeCommits = new Set<string>();
+
+        function collectExcludeTree(treeId: string) {
+          if (!isValidOid(treeId)) return;
+          if (excludeObjectIds.has(treeId)) return;
+          const obj = getObject(store, treeId);
+          if (!obj || obj.type !== 'tree') return;
+          excludeObjectIds.add(treeId);
+          try {
+            const entries = parseTree(obj.raw);
+            for (const entry of entries) {
+              if (isValidOid(entry.oid)) {
+                const childObj = getObject(store, entry.oid);
+                if (childObj) {
+                  if (childObj.type === 'tree') {
+                    collectExcludeTree(entry.oid);
+                  } else {
+                    excludeObjectIds.add(entry.oid);
+                  }
+                }
+              }
+            }
+          } catch {}
+        }
+
+        const haveQueue: string[] = [];
+        for (const h of validHaves) {
+          if (isValidOid(h)) {
+            haveQueue.push(h);
+          }
+        }
+
+        const visitedHave = new Set<string>();
+        while (haveQueue.length > 0) {
+          const hid = haveQueue.pop()!;
+          if (visitedHave.has(hid)) continue;
+          visitedHave.add(hid);
+
+          const obj = getObject(store, hid);
+          if (!obj) continue;
+
+          if (obj.type === 'tag') {
+            excludeObjectIds.add(hid);
+            try {
+              const tagObj = parseTag(obj.raw);
+              if (isValidOid(tagObj.object)) {
+                haveQueue.push(tagObj.object);
+              }
+            } catch {}
+          } else if (obj.type === 'commit') {
+            excludeObjectIds.add(hid);
+            excludeCommits.add(hid);
+            try {
+              const commitData = parseCommit(obj.raw);
+              if (isValidOid(commitData.tree)) {
+                collectExcludeTree(commitData.tree);
+              }
+              if (!clientShallows.has(hid)) {
+                for (const p of commitData.parents) {
+                  if (isValidOid(p)) {
+                    haveQueue.push(p);
+                  }
+                }
+              }
+            } catch {}
+          } else if (obj.type === 'tree') {
+            collectExcludeTree(hid);
+          } else if (obj.type === 'blob') {
+            excludeObjectIds.add(hid);
+          }
+        }
+
+        for (const id of excludeObjectIds) {
+          includedObjectIds.delete(id);
+        }
+        for (const cid of excludeCommits) {
+          includedCommits.delete(cid);
         }
       }
     }
@@ -590,7 +664,7 @@ export function handleGitUploadPack(
       const headName = 'HEAD';
       let includeHead = true;
       if (refPrefixes.length > 0) {
-        includeHead = refPrefixes.some(p => headName.startsWith(p) || defaultBranchRef.startsWith(p) || p.startsWith('HEAD'));
+        includeHead = refPrefixes.some(p => headName.startsWith(p));
       }
       if (includeHead) {
         const line = `${headTip} ${headName} symref-target:${defaultBranchRef}\n`;
