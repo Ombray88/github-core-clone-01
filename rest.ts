@@ -112,6 +112,7 @@ function formatRepo(repo: Repository) {
 
 function formatIssue(issue: Issue) {
   return {
+    id: issue.id,
     number: issue.number,
     title: issue.title,
     body: issue.body,
