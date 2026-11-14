@@ -851,11 +851,9 @@ export function handleGitReceivePack(
     }
   }
   // The report-status stream inside band 1 ends with its own flush packet,
-  // carried as band-1 data, before the outer flush that ends the response.
-  const encodedInnerFlush = encodePktLine('0000');
-  const band1Flush = new Uint8Array(1 + encodedInnerFlush.length);
-  band1Flush[0] = 1;
-  band1Flush.set(encodedInnerFlush, 1);
+  // carried as band-1 data: the four raw bytes 0000, before the outer flush
+  // that ends the response.
+  const band1Flush = new Uint8Array([1, 0x30, 0x30, 0x30, 0x30]);
   reportChunks.push(encodePktLine(band1Flush));
   reportChunks.push(encodePktLine(PKT_FLUSH));
 
