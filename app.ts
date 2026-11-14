@@ -63,6 +63,8 @@ async function readRequestBody(req: IncomingMessage): Promise<Buffer | null> {
   return Buffer.concat(chunks);
 }
 
+import { handleMcp } from './mcp.ts';
+
 /** Build the server with shared store instance and route handlers. */
 export function createApp(): Server {
   const store = createStore();
@@ -102,6 +104,24 @@ export function createApp(): Server {
       res.writeHead(gqlRes.status, gqlRes.headers);
       if (gqlRes.body !== null) {
         res.end(gqlRes.body);
+      } else {
+        res.end();
+      }
+      return;
+    }
+
+    // MCP routing
+    if (method === 'POST' && path === '/mcp') {
+      const headerMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === 'string') headerMap[k] = v;
+        else if (Array.isArray(v)) headerMap[k] = v[0];
+      }
+
+      const mcpRes = handleMcp(store, headerMap, body);
+      res.writeHead(mcpRes.status, mcpRes.headers);
+      if (mcpRes.body !== null) {
+        res.end(mcpRes.body);
       } else {
         res.end();
       }
