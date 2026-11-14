@@ -1,0 +1,9 @@
+PREP.md
+github-core-clone-01-kit/
+kit.tar.gz
+node_modules/
+*.tar.gz
+*.log
+.gemini/
+BUILD-NOTES.md
+GRADE-*.txt
