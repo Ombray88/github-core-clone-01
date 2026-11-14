@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createStore, type Store } from './store.ts';
 import { handleRest } from './rest.ts';
 import { handleGitRequest, handleGitReceivePack, handleGitUploadPack } from './git.ts';
+import { handleGraphQL } from './graphql.ts';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const MAX_BODY_SIZE = 64 * 1024 * 1024; // 64 MiB
@@ -89,7 +90,25 @@ export function createApp(): Server {
       return;
     }
 
-    // 2. REST v3 routing
+    // 2. GraphQL routing
+    if (path === '/api/graphql') {
+      const headerMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === 'string') headerMap[k] = v;
+        else if (Array.isArray(v)) headerMap[k] = v[0];
+      }
+
+      const gqlRes = handleGraphQL(store, headerMap, body);
+      res.writeHead(gqlRes.status, gqlRes.headers);
+      if (gqlRes.body !== null) {
+        res.end(gqlRes.body);
+      } else {
+        res.end();
+      }
+      return;
+    }
+
+    // 3. REST v3 routing
     if (path.startsWith('/api/v3')) {
       const query = queryOf(req);
       const restReq = {
