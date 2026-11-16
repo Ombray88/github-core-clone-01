@@ -15,36 +15,45 @@ let requestIdCounter = 1;
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
   const reqId = `req-${requestIdCounter++}`;
   const text = `${JSON.stringify(body)}\n`;
+  const buf = Buffer.from(text);
   res.writeHead(status, {
     'content-type': JSON_TYPE,
-    'content-length': Buffer.byteLength(text),
+    'content-length': buf.length,
     'x-github-request-id': reqId,
     ...extraHeaders,
   });
-  res.end(text);
+  res.end(buf);
+}
+
+function getParsedUrl(req: IncomingMessage): URL {
+  let cached = (req as any).__parsedUrl;
+  if (!cached) {
+    try {
+      cached = new URL(req.url ?? '/', 'http://entry');
+    } catch {
+      cached = new URL('/', 'http://entry');
+    }
+    (req as any).__parsedUrl = cached;
+  }
+  return cached;
 }
 
 /** Extract pathname from request URL. */
 function pathOf(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    return '/';
-  }
+  return getParsedUrl(req).pathname;
 }
 
 /** Extract query record from request URL search parameters. */
 function queryOf(req: IncomingMessage): Record<string, string> {
-  try {
-    const url = new URL(req.url ?? '/', 'http://entry');
-    const query: Record<string, string> = {};
-    for (const [key, val] of url.searchParams.entries()) {
-      query[key] = val;
+  let cached = (req as any).__queryRecord;
+  if (!cached) {
+    cached = {};
+    for (const [key, val] of getParsedUrl(req).searchParams.entries()) {
+      cached[key] = val;
     }
-    return query;
-  } catch {
-    return {};
+    (req as any).__queryRecord = cached;
   }
+  return cached;
 }
 
 /** Read full request body up to MAX_BODY_SIZE, returning a Buffer or throwing/answering 413 if too large. */
@@ -81,15 +90,18 @@ export function createApp(): Server {
 
     // Read request body with size capping for REST and other methods if needed
     let body: Buffer | null = null;
-    try {
-      body = await readRequestBody(req);
-    } catch (err: any) {
-      if (err && err.message === 'BODY_TOO_LARGE') {
-        sendJson(res, 413, { message: 'Request entity too large' });
-      } else {
-        sendJson(res, 400, { message: 'Bad request body' });
+    const hasBody = (method !== 'GET' && method !== 'HEAD') || req.headers['content-length'] != null || req.headers['transfer-encoding'] != null;
+    if (hasBody) {
+      try {
+        body = await readRequestBody(req);
+      } catch (err: any) {
+        if (err && err.message === 'BODY_TOO_LARGE') {
+          sendJson(res, 413, { message: 'Request entity too large' });
+        } else {
+          sendJson(res, 400, { message: 'Bad request body' });
+        }
+        return;
       }
-      return;
     }
 
     // 2. GraphQL routing

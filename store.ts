@@ -223,11 +223,11 @@ export interface Repository {
   nextIssueNumber: number;
   nextCommentId: number;
 }
-
 export interface Store {
   objects: Map<string, GitObjectEntry>;
   repositories: Map<string, Repository>;
   nextRepoId: number;
+  version: number;
 }
 
 export function createStore(): Store {
@@ -235,6 +235,7 @@ export function createStore(): Store {
     objects: new Map<string, GitObjectEntry>(),
     repositories: new Map<string, Repository>(),
     nextRepoId: 1,
+    version: 0,
   };
 }
 
@@ -275,6 +276,7 @@ export function createRepository(
     nextCommentId: 1,
   };
   store.repositories.set(key, repo);
+  store.version++;
   return repo;
 }
 
@@ -298,7 +300,9 @@ export function listViewerRepositories(store: Store): Repository[] {
 export function deleteRepository(store: Store, owner: string, name: string): boolean {
   if (owner !== viewerLogin) return false;
   const key = `${owner}/${name}`;
-  return store.repositories.delete(key);
+  const deleted = store.repositories.delete(key);
+  if (deleted) store.version++;
+  return deleted;
 }
 
 // ---------------------------------------------------------------- Git-Object and Ref Helpers
@@ -306,6 +310,7 @@ export function deleteRepository(store: Store, owner: string, name: string): boo
 export function putObject(store: Store, type: string, raw: Uint8Array, id?: string): string {
   const objectId = id ?? hashObjectId(type, raw);
   store.objects.set(objectId, { type, raw });
+  store.version++;
   return objectId;
 }
 
@@ -339,12 +344,14 @@ export function resolveRef(store: Store, repo: Repository, refName: string): str
 export function setRef(store: Store, repo: Repository, refName: string, commitId: string): void {
   const fullName = refName.startsWith('refs/') ? refName : `refs/heads/${refName}`;
   repo.refs.set(fullName, commitId);
+  store.version++;
 }
 
 export function deleteRef(store: Store, repo: Repository, refName: string): void {
   repo.refs.delete(refName);
   repo.refs.delete(`refs/heads/${refName}`);
   repo.refs.delete(`refs/tags/${refName}`);
+  store.version++;
 }
 
 export function listRefs(store: Store, repo: Repository): Array<{ name: string; oid: string }> {

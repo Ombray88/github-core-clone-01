@@ -135,6 +135,12 @@ function formatPullRequest(pr: PullRequest) {
   };
 }
 
+const singleIssueCache = new Map<string, string>();
+
+export function invalidateIssueCache(owner: string, repoName: string, issueNum: number): void {
+  singleIssueCache.delete(`${owner}/${repoName}/${issueNum}`);
+}
+
 export function handleRest(store: Store, req: RestRequest): RestResponse {
   const method = req.method.toUpperCase();
   const pathname = req.pathname;
@@ -564,7 +570,22 @@ export function handleRest(store: Store, req: RestRequest): RestResponse {
       const issue = repo.issues.find((i) => i.number === issueNum);
       if (!issue) return errorReply(404, 'Not Found');
 
-      return jsonReply(200, formatIssue(issue));
+      const cacheKey = `${owner}/${repoName}/${issueNum}`;
+      const cached = singleIssueCache.get(cacheKey);
+      if (cached) {
+        return {
+          status: 200,
+          headers: makeHeaders(),
+          body: cached,
+        };
+      }
+      const body = JSON.stringify(formatIssue(issue));
+      singleIssueCache.set(cacheKey, body);
+      return {
+        status: 200,
+        headers: makeHeaders(),
+        body,
+      };
     }
 
     // 22. PATCH /api/v3/repos/{owner}/{repo}/issues/{number}
@@ -579,6 +600,8 @@ export function handleRest(store: Store, req: RestRequest): RestResponse {
       if (bodyObj.state === 'open' || bodyObj.state === 'closed') {
         issue.state = bodyObj.state;
       }
+
+      invalidateIssueCache(owner, repoName, issueNum);
 
       return jsonReply(200, formatIssue(issue));
     }
@@ -599,6 +622,8 @@ export function handleRest(store: Store, req: RestRequest): RestResponse {
         body: typeof bodyObj.body === 'string' ? bodyObj.body : '',
       };
       issue.comments.push(comment);
+
+      invalidateIssueCache(owner, repoName, issueNum);
 
       return jsonReply(201, {
         id: comment.id,

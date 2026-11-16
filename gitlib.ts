@@ -480,6 +480,7 @@ export function readPack(
     }
 
     const compressedOffset = pos;
+    // Single-pass inflate
     const { raw: decompressed, consumed } = inflateWithLength(packBytes, compressedOffset, packBytes.length - 20);
     pos = compressedOffset + consumed;
 
@@ -584,26 +585,68 @@ export function readPack(
   return { objects: resolvedObjects, deltaCount };
 }
 
-function inflateWithLength(buf: Uint8Array, offset: number, maxEnd: number): { raw: Uint8Array; consumed: number } {
-  let l = 2;
-  let r = maxEnd - offset;
-  let bestRaw: Uint8Array | null = null;
-  let bestLen = 0;
+function computeAdler32(data: Uint8Array): number {
+  let a = 1;
+  let b = 0;
+  for (let i = 0; i < data.length; i++) {
+    a = (a + data[i]) % 65521;
+    b = (b + a) % 65521;
+  }
+  return ((b << 16) | a) >>> 0;
+}
 
-  // Binary search for zlib stream length
-  while (l <= r) {
-    const mid = (l + r) >> 1;
-    try {
-      const decompressed = zlib.inflateSync(buf.subarray(offset, offset + mid));
-      bestRaw = decompressed;
-      bestLen = mid;
-      r = mid - 1; // Try shorter length
-    } catch {
-      l = mid + 1; // Need more bytes
+function inflateWithLength(buf: Uint8Array, offset: number, maxEnd: number): { raw: Uint8Array; consumed: number } {
+  const raw = zlib.inflateSync(buf.subarray(offset, maxEnd));
+
+  const adler = computeAdler32(raw);
+  const b0 = (adler >>> 24) & 0xff;
+  const b1 = (adler >>> 16) & 0xff;
+  const b2 = (adler >>> 8) & 0xff;
+  const b3 = adler & 0xff;
+
+  const startScan = offset + 2;
+  const endScan = maxEnd - 4;
+
+  for (let i = startScan; i <= endScan; i++) {
+    if (buf[i] === b0 && buf[i + 1] === b1 && buf[i + 2] === b2 && buf[i + 3] === b3) {
+      try {
+        const testRaw = zlib.inflateSync(buf.subarray(offset, i + 4));
+        if (testRaw.length === raw.length) {
+          let match = true;
+          for (let k = 0; k < raw.length; k++) {
+            if (testRaw[k] !== raw[k]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            return { raw, consumed: (i + 4) - offset };
+          }
+        }
+      } catch {
+        // ignore inflate failure for false-positive adler matches
+      }
     }
   }
 
-  if (!bestRaw) {
+  let low = 2;
+  let high = maxEnd - offset;
+  let bestRaw: Uint8Array | null = null;
+  let bestLen = -1;
+
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    try {
+      const inflated = zlib.inflateSync(buf.subarray(offset, offset + mid));
+      bestRaw = inflated;
+      bestLen = mid;
+      high = mid - 1;
+    } catch {
+      low = mid + 1;
+    }
+  }
+
+  if (bestRaw === null) {
     throw new Error('Failed to inflate zlib stream in packfile');
   }
 

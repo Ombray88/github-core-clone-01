@@ -183,6 +183,34 @@ export function handleGitRequest(
 /**
  * Handle git-upload-pack POST requests (Protocol v2 ls-refs).
  */
+class PackCache {
+  #maxSize: number;
+  #map: Map<string, Uint8Array>;
+
+  constructor(maxSize = 32) {
+    this.#maxSize = maxSize;
+    this.#map = new Map();
+  }
+
+  get(key: string): Uint8Array | undefined {
+    return this.#map.get(key);
+  }
+
+  set(key: string, value: Uint8Array): void {
+    if (this.#map.has(key)) {
+      this.#map.delete(key);
+    } else if (this.#map.size >= this.#maxSize) {
+      const oldestKey = this.#map.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.#map.delete(oldestKey);
+      }
+    }
+    this.#map.set(key, value);
+  }
+}
+
+const packCache = new PackCache(64);
+
 export function handleGitUploadPack(
   store: Store,
   owner: string,
@@ -286,6 +314,29 @@ export function handleGitUploadPack(
         }
       }
       i++;
+    }
+
+    const cacheKey = [
+      owner,
+      repoName,
+      String(store.version ?? 0),
+      `wants:${wants.slice().sort().join(',')}`,
+      `haves:${haves.slice().sort().join(',')}`,
+      `deepen:${deepen ?? ''}`,
+      `shallows:${Array.from(clientShallows).sort().join(',')}`
+    ].join('|');
+
+    const cachedBody = packCache.get(cacheKey);
+    if (cachedBody) {
+      return {
+        status: 200,
+        headers: {
+          'content-type': 'application/x-git-upload-pack-result',
+          'content-length': String(cachedBody.length),
+          'cache-control': 'no-cache',
+        },
+        body: cachedBody
+      };
     }
 
     const cutParents = new Set<string>();
@@ -616,6 +667,8 @@ export function handleGitUploadPack(
       bodyBytes.set(c, offset);
       offset += c.length;
     }
+
+    packCache.set(cacheKey, bodyBytes);
 
     return {
       status: 200,
